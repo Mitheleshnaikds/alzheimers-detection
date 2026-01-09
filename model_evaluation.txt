@@ -1,0 +1,8 @@
+Training log appended:
+CNN+SVM
+850/850 ━━━━━━━━━━━━━━━━━━━━ 29s 34ms/step - accuracy: 0.9600 - loss: 0.1026 - val_accuracy: 0.8605 - val_loss: 0.5179  (cnn + svm)
+
+
+RESNET50
+850/850 ━━━━━━━━━━━━━━━━━━━━ 94s 110ms/step - accuracy: 0.5662 - loss: 0.9771 - val_accuracy: 0.6563 - val_loss: 0.8396
+213/213 ━━━━━━━━━━━━━━━━━━━━ 27s 101ms/step

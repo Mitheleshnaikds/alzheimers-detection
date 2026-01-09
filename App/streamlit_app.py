@@ -4,6 +4,9 @@ from keras.models import load_model
 from PIL import Image
 import numpy as np
 import matplotlib.pyplot as plt
+import os
+import json
+import joblib
 
 # Page configuration
 st.set_page_config(
@@ -13,10 +16,92 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Load the pre-trained model
-model = load_model('model.h5')
-# Define the image size for model input
+# Sidebar
+st.sidebar.markdown("### 📤 Upload MRI Image")
+st.sidebar.markdown("Upload a brain MRI scan for analysis")
+
+# Select model architecture
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 🧩 Model Architecture")
+selected_arch = st.sidebar.selectbox(
+    label="Choose model",
+    options=["cnn", "cnn_svm"],
+    index=0,
+    help="Pick which trained model to use"
+)
+
+# Prepare paths and placeholders
+base_dir = os.path.dirname(__file__)
+model = None
+classifier = None
+meta = None
+feature_model = None
+preprocess_fn = None
+
 IMG_SIZE = (128, 128)
+
+if selected_arch == 'cnn':
+    model_path = os.path.join(base_dir, 'model.h5')
+    IMG_SIZE = (128, 128)
+    if os.path.exists(model_path):
+        model = load_model(model_path)
+    else:
+        st.sidebar.warning("Keras CNN model not found (model.h5).")
+        st.sidebar.info("Train the CNN using train_model.py or place model.h5 in App/")
+
+else:  # cnn_svm
+    IMG_SIZE = (128, 128)
+    # Prefer a packaged end-to-end Keras hybrid model if present
+    keras_hybrid_path = os.path.join(base_dir, 'model_cnn_svm.h5')
+    if os.path.exists(keras_hybrid_path):
+        try:
+            model = load_model(keras_hybrid_path)
+            st.sidebar.success('Loaded end-to-end Keras hybrid model (model_cnn_svm.h5).')
+        except Exception as e:
+            st.sidebar.error(f'Failed to load {os.path.basename(keras_hybrid_path)}: {e}')
+    else:
+        # Fallback: look for an sklearn classifier + a feature extractor model
+        clf_path = os.path.join(base_dir, 'svm_model.pkl')
+        feat_path = os.path.join(base_dir, 'cnn_feature_extractor.h5')
+        # If user provided a feature-extractor model separately, prefer that
+        if os.path.exists(clf_path):
+            try:
+                classifier = joblib.load(clf_path)
+                st.sidebar.success(f'Loaded classifier: {os.path.basename(clf_path)}')
+            except Exception as e:
+                st.sidebar.error(f'Failed to load classifier {os.path.basename(clf_path)}: {e}')
+                classifier = None
+
+        # Load feature extractor: explicit extractor file or fall back to cnn_model.h5 / model.h5
+        if os.path.exists(feat_path):
+            try:
+                feature_model = load_model(feat_path)
+                st.sidebar.success(f'Loaded feature extractor: {os.path.basename(feat_path)}')
+            except Exception as e:
+                st.sidebar.error(f'Failed to load feature extractor {os.path.basename(feat_path)}: {e}')
+                feature_model = None
+        else:
+            # try named CNN models
+            for candidate in ['cnn_model.h5', 'model.h5']:
+                cand_path = os.path.join(base_dir, candidate)
+                if os.path.exists(cand_path):
+                    try:
+                        base_model = load_model(cand_path)
+                        # try to find a named feature layer first
+                        try:
+                            feature_model = tf.keras.Model(inputs=base_model.input, outputs=base_model.get_layer('feat_dense').output)
+                        except Exception:
+                            # fallback: use the penultimate layer
+                            feature_model = tf.keras.Model(inputs=base_model.input, outputs=base_model.layers[-2].output)
+                        st.sidebar.success(f'Using {candidate} for feature extraction')
+                        break
+                    except Exception as e:
+                        st.sidebar.warning(f'Could not use {candidate} as feature extractor: {e}')
+            if feature_model is None:
+                st.sidebar.warning('No feature extractor found. Place cnn_feature_extractor.h5, cnn_model.h5 or model.h5 in App/.')
+
+        if classifier is None or feature_model is None:
+            st.sidebar.info('Hybrid pipeline incomplete: ensure both classifier (svm_model.pkl) and feature extractor are present in App/.')
 
 # Modern CSS styling
 st.markdown(
@@ -250,40 +335,67 @@ st.markdown(
 st.markdown("<h1 class='title'>🧠 Alzheimer's Disease Detection</h1>", unsafe_allow_html=True)
 st.markdown("<p class='subtitle'>AI-Powered Brain MRI Analysis for Early Detection • Utilizing Deep Learning for Medical Diagnosis</p>", unsafe_allow_html=True)
 
-# Sidebar
-st.sidebar.markdown("### 📤 Upload MRI Image")
-st.sidebar.markdown("Upload a brain MRI scan for analysis")
-
-
 def preprocess_image(image):
     # Convert PIL image to numpy array
     img_array = np.array(image)
     
-    # Resize to 128x128 (required by model)
+    # Resize to model input size
     img_pil = Image.fromarray(img_array.astype('uint8')) if len(img_array.shape) == 2 else Image.fromarray(img_array)
-    img_pil = img_pil.resize((128, 128), Image.Resampling.LANCZOS)
+    img_pil = img_pil.resize(IMG_SIZE, Image.Resampling.LANCZOS)
     img_array = np.array(img_pil)
     
-    # Convert to grayscale if needed
-    if len(img_array.shape) == 3:
-        # If RGB, convert to grayscale
-        if img_array.shape[2] >= 3:
-            img_gray = np.mean(img_array[:, :, :3], axis=2)
-            img_array = img_gray
+    # Ensure 3-channel RGB
+    if len(img_array.shape) == 2:
+        rgb_image = np.repeat(img_array[:, :, np.newaxis], 3, axis=2)
+    elif img_array.shape[2] == 1:
+        rgb_image = np.repeat(img_array, 3, axis=2)
+    else:
+        rgb_image = img_array[:, :, :3]
     
-    # Convert to float and normalize
-    img_array = img_array.astype('float32') / 255.0
-    
-    # Create RGB by repeating grayscale
-    rgb_image = np.repeat(img_array[:, :, np.newaxis], 3, axis=2)
+    # Preprocessing:
+    # - For hybrid with ImageNet backbones, use their preprocess functions
+    # - For CNN models, normalize to [0,1]
+    if selected_arch == 'resnet50':
+        # Keras models expect [0,1] normalized; resnet was trained with preprocess_input in the trainer
+        img_proc = rgb_image.astype('float32') / 255.0
+    else:
+        # cnn and cnn_svm use 1/255 scaling
+        img_proc = rgb_image.astype('float32') / 255.0
     
     # Add batch dimension
-    img_array = np.expand_dims(rgb_image, axis=0)
-    
+    img_array = np.expand_dims(img_proc, axis=0)
     return img_array
 
 def predict(image):
     img_array = preprocess_image(image)
+    # Hybrid path
+    if selected_arch == 'cnn_svm':
+        # If an end-to-end Keras hybrid model was loaded, use it directly
+        if model is not None:
+            prediction = model.predict(img_array)
+            predicted_idx = int(np.argmax(prediction, axis=1)[0])
+            confidence = float(np.max(prediction) * 100)
+            return predicted_idx, confidence, prediction[0]
+
+        # Otherwise fallback to classical classifier + feature extractor
+        if classifier is None or feature_model is None:
+            return None, None, None
+        feats = feature_model.predict(img_array)
+        if hasattr(classifier, 'predict_proba'):
+            probs = classifier.predict_proba(feats)
+        else:
+            try:
+                decision = classifier.decision_function(feats)
+                exp = np.exp(decision - np.max(decision, axis=1, keepdims=True))
+                probs = exp / np.sum(exp, axis=1, keepdims=True)
+            except Exception:
+                return None, None, None
+        predicted_idx = int(np.argmax(probs, axis=1)[0])
+        confidence = float(np.max(probs) * 100)
+        return predicted_idx, confidence, probs[0]
+    # Pure Keras model path
+    if model is None:
+        return None, None, None
     prediction = model.predict(img_array)
     predicted_idx = np.argmax(prediction, axis=1)[0]
     confidence = np.max(prediction) * 100
@@ -395,6 +507,9 @@ else:
     with col2:
         with st.spinner('🔍 Analyzing MRI scan...'):
             predicted_idx, confidence, all_predictions = predict(image)
+            if predicted_idx is None:
+                st.error("Selected model is not available. Please train it first.")
+                st.stop()
         
         class_labels = ['Mild Demented', 'Moderate Demented', 'Non Demented', 'Very Mild Demented']
         predicted_label = class_labels[predicted_idx]
