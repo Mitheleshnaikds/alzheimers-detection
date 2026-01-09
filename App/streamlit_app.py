@@ -25,7 +25,7 @@ st.sidebar.markdown("---")
 st.sidebar.markdown("### 🧩 Model Architecture")
 selected_arch = st.sidebar.selectbox(
     label="Choose model",
-    options=["cnn", "cnn_svm"],
+    options=["cnn", "cnn_svm", "vgg16"],
     index=0,
     help="Pick which trained model to use"
 )
@@ -48,6 +48,22 @@ if selected_arch == 'cnn':
     else:
         st.sidebar.warning("Keras CNN model not found (model.h5).")
         st.sidebar.info("Train the CNN using train_model.py or place model.h5 in App/")
+
+elif selected_arch == 'vgg16':
+    # VGG16 end-to-end Keras model (expects 224x224 and ImageNet preprocessing)
+    IMG_SIZE = (224, 224)
+    vgg_path = os.path.join(base_dir, 'vgg16_alzheimer_model.h5')
+    preprocess_fn = None
+    if os.path.exists(vgg_path):
+        try:
+            model = load_model(vgg_path)
+            preprocess_fn = tf.keras.applications.vgg16.preprocess_input
+            st.sidebar.success(f'Loaded VGG16 model: {os.path.basename(vgg_path)}')
+        except Exception as e:
+            st.sidebar.error(f'Failed to load {os.path.basename(vgg_path)}: {e}')
+    else:
+        st.sidebar.warning('VGG16 model not found (vgg16_alzheimer_model.h5).')
+        st.sidebar.info('Place vgg16_alzheimer_model.h5 in App/ to enable VGG16 predictions.')
 
 else:  # cnn_svm
     IMG_SIZE = (128, 128)
@@ -353,13 +369,13 @@ def preprocess_image(image):
         rgb_image = img_array[:, :, :3]
     
     # Preprocessing:
-    # - For hybrid with ImageNet backbones, use their preprocess functions
-    # - For CNN models, normalize to [0,1]
-    if selected_arch == 'resnet50':
-        # Keras models expect [0,1] normalized; resnet was trained with preprocess_input in the trainer
-        img_proc = rgb_image.astype('float32') / 255.0
+    # - If a specialized preprocess function is set (for ImageNet backbones), use it
+    # - Otherwise normalize to [0,1]
+    global preprocess_fn
+    if 'preprocess_fn' in globals() and preprocess_fn is not None:
+        img_proc = rgb_image.astype('float32')
+        img_proc = preprocess_fn(img_proc)
     else:
-        # cnn and cnn_svm use 1/255 scaling
         img_proc = rgb_image.astype('float32') / 255.0
     
     # Add batch dimension
